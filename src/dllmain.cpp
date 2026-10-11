@@ -59,6 +59,29 @@ struct RegAppend  // registry mapping appended for Russian
     uint32_t    region;
 };
 
+struct AuxRef  // an immediate referencing newTable + delta
+{
+    uint32_t rva;
+    uint8_t  preLen;
+    uint8_t  pre[5];
+    uint32_t oldValue;
+    uint32_t delta;
+};
+
+struct PSPathFix  // restores the paths of a copied ProStreet row
+{
+    int         index;
+    const char* paths[4];
+};
+
+struct PSNewEntry  // a ProStreet row appended after the originals
+{
+    uint32_t    id;
+    const char* name;
+    const char* code;
+    const char* paths[4];
+};
+
 struct GameDef
 {
     const char* title;
@@ -83,10 +106,17 @@ struct GameDef
     int endRefCount;
     const BytePatch* bytePatches;
     int bytePatchCount;
+    const AuxRef* auxRefs;
+    int auxRefCount;
+    const PSPathFix* psPathFix;    // ProStreet: restore a defused row's paths
+    const PSNewEntry* psNewEntries;
+    int psNewEntryCount;
+    uint32_t psSharedRva, psPerLangRva;
 };
 
 #include "MW.h"
 #include "Carbon.h"
+#include "PS.h"
 
 static void WriteBytes(uint8_t* base, uint32_t rva, const void* data, size_t len)
 {
@@ -107,6 +137,29 @@ static uint8_t* BuildTable(uint8_t* base, const GameDef& g)
         return nullptr;
 
     memcpy(table, base + g.tableRva, size_t(g.origEntries) * g.entryStride);
+
+    if (g.psNewEntries)
+    {
+        if (g.psPathFix)
+        {
+            uint32_t* row = reinterpret_cast<uint32_t*>(table + size_t(g.psPathFix->index) * g.entryStride);
+            for (int i = 0; i < 4; ++i)
+                row[3 + i] = uint32_t(uintptr_t(g.psPathFix->paths[i]));
+        }
+        for (int i = 0; i < g.psNewEntryCount; ++i)
+        {
+            const PSNewEntry& src = g.psNewEntries[i];
+            uint32_t* entry = reinterpret_cast<uint32_t*>(table + size_t(g.origEntries + i) * g.entryStride);
+            entry[0] = src.id;
+            entry[1] = uint32_t(uintptr_t(src.name));
+            entry[2] = uint32_t(uintptr_t(src.code));
+            for (int p = 0; p < 4; ++p)
+                entry[3 + p] = uint32_t(uintptr_t(src.paths[p]));
+            entry[7] = uint32_t(uintptr_t(base) + g.psSharedRva);
+            entry[8] = uint32_t(uintptr_t(base) + g.psPerLangRva);
+        }
+        return table;
+    }
 
     const uint32_t texList = uint32_t(uintptr_t(base) + g.texListRva);
     const uint32_t code3 = uint32_t(uintptr_t(base) + g.code3Rva);
@@ -167,9 +220,15 @@ static bool ApplyReferences(uint8_t* base, const GameDef& g,
     for (int i = 0; i < g.baseRefCount && write(g.baseRefs[i].rva, &newTable, 4); ++i);
     for (int i = 0; i < g.endRefCount && write(g.endRefs[i].rva, &newEnd, 4); ++i);
     bool complete = undo.size() == size_t(g.baseRefCount + g.endRefCount);
+    for (int i = 0; complete && i < g.auxRefCount; ++i)
+    {
+        uint32_t value = newTable + g.auxRefs[i].delta;
+        complete = write(g.auxRefs[i].rva, &value, 4);
+    }
+    complete = undo.size() == size_t(g.baseRefCount + g.endRefCount + g.auxRefCount);
     for (int i = 0; complete && i < g.bytePatchCount; ++i)
         complete = write(g.bytePatches[i].rva, g.bytePatches[i].replacement, g.bytePatches[i].len);
-    if (complete)
+    if (complete && g.countRva)
         complete = write(g.countRva, &count, 4);
     for (int i = 0; complete && i < g.regRefCount; ++i)
     {
@@ -190,12 +249,14 @@ static bool TryApply(uint8_t* base, const GameDef& g)
 {
     bool inImage = InImage(base, g.fingerprintRva, g.fingerprintSize) &&
                    InImage(base, g.tableRva, size_t(g.origEntries) * g.entryStride) &&
-                   InImage(base, g.countRva, 4) &&
-                   InImage(base, g.registryRva, size_t(g.registryEntries) * 12);
+                   (!g.countRva || InImage(base, g.countRva, 4)) &&
+                   (!g.registryRva || InImage(base, g.registryRva, size_t(g.registryEntries) * 12));
     for (int i = 0; inImage && i < g.baseRefCount; ++i)
         inImage = InImage(base, g.baseRefs[i].rva, 4);
     for (int i = 0; inImage && i < g.endRefCount; ++i)
         inImage = InImage(base, g.endRefs[i].rva, 4);
+    for (int i = 0; inImage && i < g.auxRefCount; ++i)
+        inImage = InImage(base, g.auxRefs[i].rva, 4);
     for (int i = 0; inImage && i < g.bytePatchCount; ++i)
         inImage = InImage(base, g.bytePatches[i].rva, g.bytePatches[i].len);
     for (int i = 0; inImage && i < g.regRefCount; ++i)
@@ -205,8 +266,8 @@ static bool TryApply(uint8_t* base, const GameDef& g)
 
     if (memcmp(base + g.fingerprintRva, g.fingerprint, g.fingerprintSize) != 0 ||
         memcmp(base + g.tableRva, "\0\0\0\0", 4) != 0 ||
-        memcmp(base + g.countRva, &g.oldCount, 4) != 0 ||
-        memcmp(base + g.registryRva, "\0\0\0\0", 4) == 0)
+        (g.countRva && memcmp(base + g.countRva, &g.oldCount, 4) != 0) ||
+        (g.registryRva && memcmp(base + g.registryRva, "\0\0\0\0", 4) == 0))
         return false;
     for (int i = 0; i < g.baseRefCount; ++i)
         if (memcmp(base + g.baseRefs[i].rva - g.baseRefs[i].preLen,
@@ -230,8 +291,8 @@ static bool TryApply(uint8_t* base, const GameDef& g)
     uint8_t* table = BuildTable(base, g);
     if (!table)
         return false;
-    uint8_t* registry = BuildRegistry(base, g);
-    if (!registry)
+    uint8_t* registry = g.registryRva ? BuildRegistry(base, g) : nullptr;
+    if (g.registryRva && !registry)
     {
         VirtualFree(table, 0, MEM_RELEASE);
         return false;
@@ -253,6 +314,8 @@ BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID reserved)
     uint8_t* base = reinterpret_cast<uint8_t*>(GetModuleHandleA(nullptr));
     if (TryApply(base, MW_GAME))
         return TRUE;
-    TryApply(base, CARBON_GAME);
+    if (TryApply(base, CARBON_GAME))
+        return TRUE;
+    TryApply(base, PS_GAME);
     return TRUE;
 }

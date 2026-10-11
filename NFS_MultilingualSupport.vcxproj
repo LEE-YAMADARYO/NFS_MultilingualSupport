@@ -89,6 +89,7 @@
     <ClInclude Include="src\Carbon.h" />
     <ClInclude Include="src\framework.h" />
     <ClInclude Include="src\MW.h" />
+    <ClInclude Include="src\PS.h" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
