@@ -1,8 +1,8 @@
 // NFS Multilingual Support: restores the Asian and Russian language entries
-// EA cut from Most Wanted 1.3 (speed.exe) and Carbon 1.4 (nfsc.exe).
-// Every site is byte-verified against the expected original bytes first; a
-// mismatching host is left completely untouched. MW.h / Carbon.h describe the
-// per-game layout and are included after the shared types below.
+// EA cut from Most Wanted 1.3 (speed.exe), Carbon 1.4 (nfsc.exe) and
+// ProStreet 1.1 (nfs.exe). Every site is byte-verified against the expected
+// original bytes first; a mismatching host is left completely untouched.
+// MW.h / Carbon.h / PS.h describe the per-game layouts.
 #include "framework.h"
 #include <cstdint>
 #include <vector>
@@ -303,6 +303,80 @@ static bool TryApply(uint8_t* base, const GameDef& g)
     return ApplyReferences(base, g, newTable, newEnd, uint32_t(uintptr_t(registry)));
 }
 
+// ProStreet 1.1: the GameSpeech destructor walks the CSIS sample arrays even
+// before sub_900790 has relocated them; the header counts are already set and
+// the null pointers cause a write to [NULL+8]. Skip the walk until then.
+static uint8_t* gGameBase;
+
+static int __cdecl PSBankCleanupSafe(void* p)
+{
+    uint8_t* b = static_cast<uint8_t*>(p);
+    if (!b || *reinterpret_cast<uint32_t*>(b + 0x14) != uint32_t(uintptr_t(b + 40)))
+        return 0;
+
+    const uint32_t a1 = *reinterpret_cast<uint32_t*>(b + 0x14);
+    const uint32_t a2 = *reinterpret_cast<uint32_t*>(b + 0x18);
+    const uint32_t a3 = *reinterpret_cast<uint32_t*>(b + 0x1C);
+    const uint32_t c1 = *reinterpret_cast<uint16_t*>(b + 0x0A);
+    const uint32_t c2 = *reinterpret_cast<uint16_t*>(b + 0x0C);
+    const uint32_t c3 = *reinterpret_cast<uint16_t*>(b + 0x0E);
+    for (uint32_t i = 0; i < c1; ++i)
+        *reinterpret_cast<uint32_t*>(uintptr_t(a1) + i * 12 + 8) = 0xFFFFFFFF;
+    for (uint32_t i = 0; i < c2; ++i)
+        *reinterpret_cast<uint32_t*>(uintptr_t(a2) + i * 12 + 8) = 0xFFFFFFFF;
+    for (uint32_t i = 0; i < c3; ++i)
+        *reinterpret_cast<uint32_t*>(uintptr_t(a3) + i * 16 + 12) = 0xFFFFFFFF;
+
+    uint32_t* node = reinterpret_cast<uint32_t*>(b + 0x20);
+    uint32_t* head = reinterpret_cast<uint32_t*>(gGameBase + 0x7446B4);
+    if (node == head)
+        *head = *node;
+    const uint32_t prev = *reinterpret_cast<uint32_t*>(b + 0x24);
+    if (prev)
+        *reinterpret_cast<uint32_t*>(uintptr_t(prev)) = *node;
+    if (*node)
+        *reinterpret_cast<uint32_t*>(uintptr_t(*node) + 4) = prev;
+    return 0;
+}
+
+static void ApplyPSBankCleanupGuard(uint8_t* base)
+{
+    uint8_t* fn = base + 0x5008A0; // sub_9008A0, entry: mov eax,[esp+4]
+    if (memcmp(fn, "\x8B\x44\x24\x04\x56", 5) != 0)
+        return;
+    const int32_t rel = int32_t(uint32_t(uintptr_t(&PSBankCleanupSafe)) -
+                                uint32_t(uintptr_t(fn + 5)));
+    DWORD oldProtect = 0;
+    if (!VirtualProtect(fn, 5, PAGE_EXECUTE_READWRITE, &oldProtect))
+        return;
+    fn[0] = 0xE9;
+    memcpy(fn + 1, &rel, 4);
+    DWORD restored = 0;
+    VirtualProtect(fn, 5, oldProtect, &restored);
+}
+
+// Carbon 1.4: the Japanese case requests speech table index 5, which the
+// western build cuts; 1.3 uses index 0. Patch push 5 to push 0 to match it.
+static void ApplyCarbonNisSpeechFix(uint8_t* base)
+{
+    uint8_t* index = base + 0x10252B; // push 5 immediate in the language-14 case
+    if (index[-1] != 0x6A || *index != 0x05)
+        return;
+    DWORD oldProtect = 0;
+    if (VirtualProtect(index, 1, PAGE_EXECUTE_READWRITE, &oldProtect))
+    {
+        *index = 0x00; // index 0, same as the 1.3 Asian/Japanese build
+        DWORD restored = 0;
+        VirtualProtect(index, 1, oldProtect, &restored);
+    }
+}
+
+static bool FingerprintMatch(uint8_t* base, const GameDef& g)
+{
+    return InImage(base, g.fingerprintRva, g.fingerprintSize) &&
+           memcmp(base + g.fingerprintRva, g.fingerprint, g.fingerprintSize) == 0;
+}
+
 BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID reserved)
 {
     if (reason != DLL_PROCESS_ATTACH)
@@ -314,8 +388,16 @@ BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID reserved)
     uint8_t* base = reinterpret_cast<uint8_t*>(GetModuleHandleA(nullptr));
     if (TryApply(base, MW_GAME))
         return TRUE;
-    if (TryApply(base, CARBON_GAME))
+    // a duplicate copy may have relocated the table; standalone fixes still apply
+    if (TryApply(base, CARBON_GAME) || FingerprintMatch(base, CARBON_GAME))
+    {
+        ApplyCarbonNisSpeechFix(base);
         return TRUE;
-    TryApply(base, PS_GAME);
+    }
+    if (TryApply(base, PS_GAME) || FingerprintMatch(base, PS_GAME))
+    {
+        gGameBase = base;
+        ApplyPSBankCleanupGuard(base);
+    }
     return TRUE;
 }
