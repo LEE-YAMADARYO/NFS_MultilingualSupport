@@ -1,5 +1,5 @@
 # NFS Multilingual Support
-## Note: This project was assisted by an LLM. I am aware that some may not like this, but I believe I have an obligation to let everyone know.<br><br>
+## Note: This project was assisted by an LLM.<br>
 Restores the languages EA cut from the western builds of Black Box NFS. The same `.asi` file can be used for multiple games.
 ## Currently compatible game titles<br>
 - NFS Most Wanted 2005<br>
@@ -33,7 +33,7 @@ There may well be more, but given the vast scope of the game, it is impossible f
 2. Add support for Undercover (it had better be that way).<br><br>
 
 # NFS Multilingual Support_Chinese
-## 注意：此项目使用 LLM 辅助，我知道会有人不喜欢 AI 生成的东西，但我认为我有义务让每个人知道这一点.<br><br>
+## 注意：此项目使用了 LLM 辅助开发.<br>
 此插件用于对 EA 在黑盒工作室 (Black Box) 的《极品飞车》系列游戏的西方版本中移除的语言重新添加支持. 插件同时支持多个游戏.<br>
 ## 兼容的游戏列表<br>
 - 极品飞车：最高通缉 2005 (Most Wanted)<br>
